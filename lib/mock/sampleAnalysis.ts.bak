@@ -1,0 +1,657 @@
+import { ConflictAnalysisResult, ConflictType } from "@/types/conflict";
+import { ConflictFormValues } from "@/components/conflict-form";
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function intensityLabel(n: number): "low" | "moderate" | "high" | "very high" {
+  if (n <= 3) return "low";
+  if (n <= 5) return "moderate";
+  if (n <= 7) return "high";
+  return "very high";
+}
+
+function hasKeyword(text: string, ...words: string[]): boolean {
+  const lower = text.toLowerCase();
+  return words.some((w) => lower.includes(w));
+}
+
+// Korean particle helpers — derived from Unicode jongseong offset
+function wa(word: string): "와" | "과" {
+  const code = word.charCodeAt(word.length - 1);
+  if (code < 0xac00 || code > 0xd7a3) return "와";
+  return (code - 0xac00) % 28 === 0 ? "와" : "과";
+}
+
+function eul(word: string): "을" | "를" {
+  const code = word.charCodeAt(word.length - 1);
+  if (code < 0xac00 || code > 0xd7a3) return "을";
+  return (code - 0xac00) % 28 === 0 ? "를" : "을";
+}
+
+// ─── Emotion label (Korean) ──────────────────────────────────────────────────
+
+const EMOTION_LABELS_KO: Record<string, string> = {
+  anger: "분노",
+  frustration: "답답함",
+  anxiety: "불안",
+  hurt: "상처",
+  humiliation: "수치심",
+  sadness: "슬픔",
+  confusion: "혼란",
+  overwhelmed: "버거움",
+};
+
+// ─── Conflict type ───────────────────────────────────────────────────────────
+
+function classifyConflictType(situation: string): {
+  type: ConflictType;
+  typeLabel: string;
+  description: string;
+} {
+  if (hasKeyword(situation, "비판", "비판받", "지적", "망신", "공개적", "criticism", "criticized", "blamed", "called out", "public")) {
+    return {
+      type: "power_dynamics",
+      typeLabel: "위계 갈등",
+      description:
+        "직위나 권한의 차이가 이 갈등의 배경이 됩니다. 피드백이나 권위가 행사된 방식이 공정함이나 존중에 대한 기대와 어긋났을 수 있어요. 상대방이 의도적으로 상처를 주려 했다기보다, 서로 다른 기준과 기대가 부딪힌 경우일 가능성이 높습니다.",
+    };
+  }
+  if (hasKeyword(situation, "무시", "무시당", "듣지 않", "안 들어", "간과", "ignored", "dismissed", "not listened", "not heard", "overlooked")) {
+    return {
+      type: "communication",
+      typeLabel: "소통 단절",
+      description:
+        "내 말이 제대로 전달되지 않거나 충분히 들려지지 않는다는 느낌이 갈등의 핵심입니다. 서로가 듣고 인정받는 방식에서 차이가 생겼을 가능성이 높아요.",
+    };
+  }
+  if (hasKeyword(situation, "회의", "발표", "앞에서", "공개", "meeting", "presentation", "said in front", "announced")) {
+    return {
+      type: "communication",
+      typeLabel: "소통 단절",
+      description:
+        "무엇을 말했느냐보다 어떻게, 어디서, 언제 말했느냐가 갈등의 핵심인 것 같습니다. 내용보다 전달 방식이나 상황 선택에서 어긋남이 있었을 수 있어요.",
+    };
+  }
+  if (hasKeyword(situation, "업무량", "야근", "과로", "마감", "초과", "workload", "overtime", "overwork", "too much work", "deadline", "capacity")) {
+    return {
+      type: "workload",
+      typeLabel: "업무 과부하",
+      description:
+        "감당하기 어려운 업무량에 대한 기대가 이 갈등의 뿌리입니다. 업무 한계가 명확하지 않거나, 우선순위 조율이 잘 이루어지지 않거나, 일이 불균등하게 나뉘어 있는 것이 원인일 수 있어요.",
+    };
+  }
+  if (hasKeyword(situation, "역할", "책임", "업무 범위", "해야 할", "role", "responsibility", "responsibilities", "job description", "supposed to")) {
+    return {
+      type: "role_clarity",
+      typeLabel: "역할 혼선",
+      description:
+        "역할과 책임의 경계가 불분명한 것이 갈등의 원인으로 보입니다. 서로가 상대방의 역할을 다르게 이해하고 있을 가능성이 높아요.",
+    };
+  }
+  if (hasKeyword(situation, "불공평", "가치관", "윤리", "원칙", "unfair", "values", "ethics", "wrong", "morally", "principle")) {
+    return {
+      type: "values",
+      typeLabel: "가치관 충돌",
+      description:
+        "직장에서 무엇이 옳고, 공정하며, 적절한가에 대해 서로 다른 생각을 갖고 있는 상황입니다. 가치관의 차이는 쉽게 좁혀지지 않지만, 서로의 관점을 이해하는 것에서 시작할 수 있어요.",
+    };
+  }
+  // Default
+  return {
+    type: "communication",
+    typeLabel: "소통 단절",
+    description:
+      "서로의 기대나 맥락이 충분히 공유되지 않아 생긴 소통의 간극이 이 갈등으로 이어진 것 같습니다. 의도보다 전달된 방식이 문제가 된 경우일 수 있어요.",
+  };
+}
+
+// ─── Emotion analysis ────────────────────────────────────────────────────────
+
+// Part 1: Brief acknowledgment (emotion-only)
+const ACKNOWLEDGMENT: Record<string, string> = {
+  anger:       "화가 많이 나셨겠어요.",
+  frustration: "얼마나 답답하셨을지 느껴져요.",
+  anxiety:     "많이 불안하셨겠어요.",
+  hurt:        "많이 아프셨겠어요.",
+  humiliation: "많이 힘드셨겠어요, 특히 다른 사람들 앞에서였다면.",
+  sadness:     "많이 힘드셨겠어요.",
+  confusion:   "상황이 잘 이해가 안 되는 느낌이 드셨겠어요.",
+  overwhelmed: "지금 너무 많은 게 한꺼번에 쏟아지는 느낌이 드셨겠어요.",
+};
+
+// Part 2: What the emotion signals in this specific conflict context (emotion × conflictType)
+const SIGNAL: Record<string, Record<ConflictType, string>> = {
+  anger: {
+    power_dynamics: "분노는 공개적인 자리에서 기여가 방어 기회 없이 지적됐을 때 나타나는 반응이에요.",
+    communication:  "분노는 내가 분명히 말했음에도 그것이 들리지 않은 것처럼 처리됐을 때 올라오는 신호예요.",
+    workload:       "분노는 내 한계를 분명히 인식하는데 그것이 계속 무시될 때 나타나는 반응이에요.",
+    role_clarity:   "분노는 내 역할의 경계가 나와 합의 없이 넘어질 때 나타나는 신호예요.",
+    values:         "분노는 내가 옳다고 믿는 기준이 검토 없이 기각됐을 때 나타나는 반응이에요.",
+  },
+  frustration: {
+    power_dynamics: "답답함은 피드백을 받을 때마다 그 방식을 바꿀 수 없다는 느낌이 반복될 때 쌓이는 감정이에요.",
+    communication:  "답답함은 내가 말해도 그것이 실질적으로 반영되지 않는다는 느낌이 계속될 때 쌓이는 감정이에요.",
+    workload:       "답답함은 상황이 과중하다는 신호를 보내도 아무것도 달라지지 않을 때 쌓이는 감정이에요.",
+    role_clarity:   "답답함은 역할 경계가 계속 불분명한 채로 있고 그것을 바꿀 수 없다는 느낌이 들 때 쌓이는 감정이에요.",
+    values:         "답답함은 내 방식이 지속적으로 간과되거나 조정 대상이 될 때 쌓이는 감정이에요.",
+  },
+  anxiety: {
+    power_dynamics: "불안은 상사의 평가가 언제 어떤 방식으로 내려질지 예측할 수 없을 때 먼저 작동하는 반응이에요.",
+    communication:  "불안은 내가 상대에게 어떻게 받아들여지고 있는지 명확히 알 수 없는 상태가 지속될 때 나타나요.",
+    workload:       "불안은 감당해야 할 것들이 내 통제 범위를 넘어서고 있다는 인식에서 오는 반응이에요.",
+    role_clarity:   "불안은 내 역할이 어디까지인지 불분명한 채로 평가받고 있다는 인식에서 나타나는 반응이에요.",
+    values:         "불안은 내 방식이 수용되지 않을 때 내 위치가 어떻게 될지 알 수 없다는 인식에서 작동하는 반응이에요.",
+  },
+  hurt: {
+    power_dynamics: "상처는 피드백을 주는 방식에서 상대가 나를 배려해야 할 사람으로 여기지 않는다는 느낌에서 생겨요.",
+    communication:  "상처는 내가 진심을 담아 말했는데도 그것이 들리지 않았다는 느낌에서 오는 감정이에요.",
+    workload:       "상처는 내가 한계를 드러냈는데도 그것이 고려되지 않았다는 느낌에서 오는 감정이에요.",
+    role_clarity:   "상처는 경계를 표현했는데도 그게 반영되지 않는 상황이 반복될 때 쌓이는 감정이에요.",
+    values:         "상처는 내가 중요하게 여기는 것이 이 관계에서 가볍게 처리됐다는 느낌에서 오는 감정이에요.",
+  },
+  humiliation: {
+    power_dynamics: "수치심은 공개적인 자리에서 내 역량이나 판단이 교정받았을 때 나타나는 가장 강렬한 반응 중 하나예요.",
+    communication:  "수치심은 내 말이나 행동이 다른 사람들 앞에서 부적절한 것으로 처리됐을 때 나타나는 반응이에요.",
+    workload:       "수치심은 내가 역할을 제대로 수행하지 못하고 있다는 것이 드러났다고 느낄 때 나타나는 반응이에요.",
+    role_clarity:   "수치심은 내 역할 수행 방식이 기대와 다르다는 것이 공개적으로 드러났을 때 나타나는 반응이에요.",
+    values:         "수치심은 내가 옳다고 믿는 방식이 다른 사람들 앞에서 틀린 것으로 처리됐을 때 나타나는 반응이에요.",
+  },
+  sadness: {
+    power_dynamics: "슬픔은 이 관계에서 기대하던 존중이나 인정이 실현되지 않았다는 것을 인정하는 과정에서 오는 감정이에요.",
+    communication:  "슬픔은 소통이 가능한 관계라고 생각했는데 그것이 맞지 않았다는 인식에서 오는 감정이에요.",
+    workload:       "슬픔은 이 상황에서 공정하게 배려받을 수 있다고 기대했는데 그게 맞지 않았다는 인식에서 오는 감정이에요.",
+    role_clarity:   "슬픔은 역할이 명확하게 정리될 수 있다고 기대했는데 그게 계속 무산되면서 오는 감정이에요.",
+    values:         "슬픔은 서로의 방식을 존중할 수 있는 관계라고 생각했는데 그게 맞지 않았다는 인식에서 오는 감정이에요.",
+  },
+  confusion: {
+    power_dynamics: "혼란은 피드백의 기준이 일관되지 않거나 설명 없이 달라질 때, 무엇이 옳은 것인지 알 수 없게 되면서 나타나는 반응이에요.",
+    communication:  "혼란은 상대가 어떤 의도로 그렇게 반응했는지 파악할 수 없을 때 나타나는 인지적 부하 상태예요.",
+    workload:       "혼란은 업무 분배의 기준이 불분명하고, 그것을 누가 어떻게 결정하는지 알 수 없을 때 나타나는 반응이에요.",
+    role_clarity:   "혼란은 내가 해야 할 일의 범위가 상황마다 달라지면서 일관된 기준을 찾을 수 없을 때 나타나는 반응이에요.",
+    values:         "혼란은 상대의 판단 기준이 어디서 비롯된 것인지 이해할 수 없을 때 나타나는 인지적 부하 상태예요.",
+  },
+  overwhelmed: {
+    power_dynamics: "버거움은 상사의 요구나 기대를 거절하기 어려운 구조 안에서 한계를 넘은 상태가 지속될 때 나타나는 신호예요.",
+    communication:  "버거움은 계속 소통을 시도해야 하는데 그게 효과가 없다는 느낌이 반복될 때 나타나는 신호예요.",
+    workload:       "버거움은 처리해야 할 업무가 실질적으로 자신의 감당 한계를 넘어섰다는 신호예요.",
+    role_clarity:   "버거움은 내 역할의 범위가 불분명한 채로 계속 확장될 때 나타나는 신호예요.",
+    values:         "버거움은 나와 다른 방식으로 일하는 환경에서 계속 적응해야 한다는 압박이 누적될 때 나타나는 신호예요.",
+  },
+};
+
+// Part 3: Core inner belief formed in this context (emotion × conflictType)
+const INNER_BELIEF: Record<string, Record<ConflictType, string>> = {
+  anger: {
+    power_dynamics: "그 안에는 '나는 공개적인 자리에서 교정받아야 할 존재가 아니었어야 했다'는 확신이 담겨 있어요.",
+    communication:  "그 안에는 '내가 한 말은 들릴 가치가 있는 말이었다'는 확신이 담겨 있어요.",
+    workload:       "그 안에는 '내 한계는 협의해야 할 조건이지, 무시해도 되는 것이 아니다'는 인식이 담겨 있어요.",
+    role_clarity:   "그 안에는 '내 역할의 경계는 나와 합의해야 하는 것이다'는 믿음이 담겨 있어요.",
+    values:         "그 안에는 '내 판단 기준은 검토받을 가치가 있다'는 믿음이 담겨 있어요.",
+  },
+  frustration: {
+    power_dynamics: "그 안에는 '내가 아무리 노력해도 이 관계에서는 방식이 바뀌지 않는다'는 믿음이 쌓여 있어요.",
+    communication:  "그 안에는 '내가 하는 말은 이 관계에서 실질적으로 반영되지 않는다'는 믿음이 쌓여 있어요.",
+    workload:       "그 안에는 '내가 한계를 표현해도 이 상황에서는 달라지지 않는다'는 믿음이 쌓여 있어요.",
+    role_clarity:   "그 안에는 '내가 명확하게 해달라고 해도 이 관계에서는 정리되지 않는다'는 믿음이 쌓여 있어요.",
+    values:         "그 안에는 '내 방식은 여기서 결국 받아들여지지 않는다'는 믿음이 쌓여 있어요.",
+  },
+  anxiety: {
+    power_dynamics: "그 안에는 '이 관계에서 내 위치는 언제든 평가에 따라 흔들릴 수 있다'는 인식이 깔려 있어요.",
+    communication:  "그 안에는 '이 관계에서 나는 어떻게 받아들여지고 있는지 알 수 없다'는 불확실성이 깔려 있어요.",
+    workload:       "그 안에는 '이 상황을 내가 감당하지 못하면 내 위치가 달라질 수 있다'는 인식이 깔려 있어요.",
+    role_clarity:   "그 안에는 '내 역할이 명확하지 않은 상태에서 나는 어떤 기준으로 평가받을지 알 수 없다'는 불안이 깔려 있어요.",
+    values:         "그 안에는 '내 방식이 맞지 않는다고 판단받을 경우 이 관계에서 내 위치가 어떻게 될지 모른다'는 인식이 깔려 있어요.",
+  },
+  hurt: {
+    power_dynamics: "그 안에는 '나는 이 사람에게 배려해야 할 사람이 아니었다'는 인식이 자리하고 있어요.",
+    communication:  "그 안에는 '나는 이 사람에게 귀 기울일 만한 가치가 있는 존재가 아니었다'는 인식이 자리하고 있어요.",
+    workload:       "그 안에는 '나는 이 사람에게 한계를 가진 사람으로 인식되지 않고 있다'는 믿음이 자리하고 있어요.",
+    role_clarity:   "그 안에는 '내가 경계를 표현했는데도 이 사람은 그것을 지킬 필요가 없다고 본다'는 인식이 자리하고 있어요.",
+    values:         "그 안에는 '내가 중요하게 여기는 것은 이 사람에게도 중요하지 않다'는 인식이 자리하고 있어요.",
+  },
+  humiliation: {
+    power_dynamics: "그 안에는 '나는 공개적인 자리에서 교정받아야 할 존재로 위치됐다'는 인식이 담겨 있어요.",
+    communication:  "그 안에는 '내 말이나 행동이 다른 사람들 앞에서 부적절한 것으로 처리됐다'는 인식이 담겨 있어요.",
+    workload:       "그 안에는 '나는 역할을 제대로 감당하지 못하는 사람으로 드러날 수 있다'는 믿음이 담겨 있어요.",
+    role_clarity:   "그 안에는 '내가 역할을 잘못 이해하고 있었다는 것이 드러났다'는 인식이 담겨 있어요.",
+    values:         "그 안에는 '내가 옳다고 믿었던 것이 다른 사람들 앞에서 틀린 것으로 드러났다'는 인식이 담겨 있어요.",
+  },
+  sadness: {
+    power_dynamics: "그 안에는 '이 관계는 내가 배려받을 수 있다고 기대하던 관계가 아니었다'는 인식이 담겨 있어요.",
+    communication:  "그 안에는 '나는 이 사람과 서로 들을 수 있는 관계라고 생각했지만, 그게 맞지 않았다'는 인식이 담겨 있어요.",
+    workload:       "그 안에는 '이 관계에서 내가 공정하게 배려받을 수 있다고 기대했지만, 그게 맞지 않았다'는 인식이 담겨 있어요.",
+    role_clarity:   "그 안에는 '이 관계는 역할과 책임을 함께 명확히 정리할 수 있는 관계가 아닐 수 있다'는 인식이 담겨 있어요.",
+    values:         "그 안에는 '이 사람과 서로의 방식을 존중할 수 있는 관계라고 기대했지만, 그게 맞지 않았다'는 인식이 담겨 있어요.",
+  },
+  confusion: {
+    power_dynamics: "그 안에는 '어떻게 하면 이 사람의 기대를 충족할 수 있는지 알 수 없다'는 불신이 깔려 있어요.",
+    communication:  "그 안에는 '이 사람이 실제로 무엇을 원하는지, 왜 그렇게 반응했는지 알 수 없다'는 불신이 깔려 있어요.",
+    workload:       "그 안에는 '이 상황에서 무엇이 정당한 요구이고 무엇이 아닌지 판단하기 어렵다'는 불신이 깔려 있어요.",
+    role_clarity:   "그 안에는 '내가 해야 할 것과 하지 않아도 되는 것의 기준이 무엇인지 알 수 없다'는 불신이 깔려 있어요.",
+    values:         "그 안에는 '이 사람이 어떤 기준으로 옳고 그름을 판단하는지 알 수 없다'는 불신이 깔려 있어요.",
+  },
+  overwhelmed: {
+    power_dynamics: "그 안에는 '나는 이 구조 안에서 한계를 표현할 수 없는 위치에 있다'는 인식이 담겨 있어요.",
+    communication:  "그 안에는 '나는 이 상황에서 내 상태를 전달해도 달라지는 것이 없다'는 인식이 담겨 있어요.",
+    workload:       "그 안에는 '나는 지금 이것을 혼자 감당하기 어려운 상태에 있다'는 인식이 담겨 있어요.",
+    role_clarity:   "그 안에는 '내 역할의 범위가 명확하지 않아서 어디까지 감당해야 하는지 알 수 없다'는 인식이 담겨 있어요.",
+    values:         "그 안에는 '이 환경에서 내 방식으로 일하는 것은 계속 저항을 받는 일이다'는 인식이 담겨 있어요.",
+  },
+};
+
+// Part 4: Psychological function of the reaction (emotion-only)
+const PSYCH_FUNCTION: Record<string, string> = {
+  anger:       "이 반응은 그 침범에 맞서 자신의 경계를 지키려는 심리적 방어예요. 분노가 없다면 경계 자체가 없는 거예요.",
+  frustration: "이 반응은 무력감으로부터 자신을 지키려는 시도예요. 답답함을 느끼는 한 아직 포기하지 않은 거예요.",
+  anxiety:     "이 반응은 통제력을 잃지 않으려는 심리적 준비 상태예요. 대비할수록 덜 취약해진다는 믿음이 작동하는 거예요.",
+  hurt:        "이 반응은 더 깊은 실망을 막기 위해 관계에 대한 기대를 재조정하려는 심리적 작업이에요.",
+  humiliation: "이 반응은 그 장면을 반복 재생하며 무엇이 잘못됐는지 파악하려는 심리적 시도예요. 재연을 통해 통제감을 되찾으려는 거예요.",
+  sadness:     "이 반응은 상실을 부정하지 않고 현실로 받아들이는 내면의 작업이에요. 슬픔을 느낀다는 건 아직 그것이 소중하다는 뜻이기도 해요.",
+  confusion:   "이 반응은 성급하게 결론 내리는 것을 막는 심리적 안전장치예요. 혼란스럽다는 건 아직 판단을 유보하고 있다는 뜻이에요.",
+  overwhelmed: "이 반응은 한계를 감지하고 도움이나 여유를 요청하도록 만드는 심리적 경보예요.",
+};
+
+// Part 5: Precise relational judgment (emotion × conflictType)
+const RELATIONAL_JUDGMENT: Record<string, Record<ConflictType, string>> = {
+  anger: {
+    power_dynamics: "지금 이 반응의 핵심은 회의 자리에서 내가 발언권을 가진 구성원이 아니라, 공개적으로 교정받아야 할 대상으로 다뤄지고 있다는 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 내가 이 관계에서 응답받을 자격이 있는 사람이 아니라, 말해도 지나쳐도 되는 사람으로 취급되고 있다는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 내 한계가 조율해야 할 조건이 아니라, 요구를 감수해야 하는 개인 사정으로 처리되고 있다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 내 역할의 경계가 협의해야 할 것이 아니라, 상황에 따라 일방적으로 넘어도 되는 선으로 취급되고 있다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 내 판단 기준이 이 관계에서 논의할 가치 있는 입장이 아니라, 교정받아야 할 오류로 취급되고 있다는 판단입니다.",
+  },
+  frustration: {
+    power_dynamics: "지금 이 반응의 핵심은 내가 피드백 방식을 바꿀 수 있는 당사자가 아니라, 그것을 감수해야 하는 역할로 고정돼 있다는 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 내가 이 관계에서 무언가를 바꿀 수 있는 위치가 아니라, 말해도 달라지지 않는 사람으로 취급되고 있다는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 내가 업무 조율의 당사자가 아니라, 할당을 받아들이기만 하면 되는 사람으로 취급되고 있다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 내가 역할을 정하는 데 발언권이 있는 사람이 아니라, 정해진 것을 수행하기만 하면 되는 사람으로 취급되고 있다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 내 방식이 이 관계에서 논의될 관점이 아니라, 조정받아야 할 문제로 취급되고 있다는 판단입니다.",
+  },
+  anxiety: {
+    power_dynamics: "지금 이 반응의 핵심은 내 위치가 이 관계에서 안정적으로 유지될 수 있는 것인지, 아니면 평가에 따라 언제든 재정의될 수 있는 것인지에 대한 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 내가 이 관계에서 어떻게 받아들여지고 있는지, 그 기준을 알 수 없다는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 내가 이 상황을 감당하지 못하는 것이 곧 내 위치를 위협하는 조건이 될 수 있다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 역할이 불분명한 채로 있으면 내가 어떤 기준으로 평가받을지 알 수 없다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 내 방식이 이 관계에서 수용되지 않을 경우 내 위치가 어떻게 달라질지 알 수 없다는 판단입니다.",
+  },
+  hurt: {
+    power_dynamics: "지금 이 반응의 핵심은 피드백을 주는 방식에서 상대가 나를 배려해야 할 사람으로 여기지 않는다는 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 내가 이 사람에게 귀 기울일 가치 있는 존재가 아니라는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 상대가 내 한계를 알면서도 그것을 자신과 무관한 문제로 취급하고 있다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 내가 경계를 표현했음에도 상대가 그것을 지킬 필요가 없다고 보고 있다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 내가 중요하게 여기는 것이 상대에게는 배려할 가치가 없는 것으로 취급되고 있다는 판단입니다.",
+  },
+  humiliation: {
+    power_dynamics: "지금 이 반응의 핵심은 발표 자리에서 내가 수정받아야 할 존재로 공개적으로 위치됐다는 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 내 말이나 행동이 다른 사람들 앞에서 부적절한 것으로 공개적으로 처리됐다는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 내가 역할을 제대로 수행하지 못하는 사람으로 드러날 수 있는 상황에 처해 있다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 내가 역할을 잘못 이해하고 있었다는 것이 다른 사람들 앞에서 드러났다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 내 방식이 틀렸다는 것이 다른 사람들 앞에서 공개적으로 드러난 것으로 처리됐다는 판단입니다.",
+  },
+  sadness: {
+    power_dynamics: "지금 이 반응의 핵심은 이 관계에서 내가 배려받을 수 있는 사람이라고 기대했지만, 그 기대가 성립하지 않는다는 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 이 사람과 서로 들을 수 있는 관계라고 생각했지만, 그게 성립하지 않는다는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 이 관계에서 공정하게 배려받을 수 있다고 기대했는데, 그게 맞지 않는다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 역할과 책임이 함께 정리될 수 있는 관계라고 기대했는데, 그게 성립하지 않는다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 서로 다른 방식을 존중할 수 있는 관계라고 생각했는데, 그게 성립하지 않는다는 판단입니다.",
+  },
+  confusion: {
+    power_dynamics: "지금 이 반응의 핵심은 상대의 피드백 기준이 어디에 있는지, 내가 무엇을 해야 그 기준을 충족할 수 있는지 알 수 없다는 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 상대가 어떤 의도로 그렇게 반응했는지, 그리고 나는 어떤 존재로 받아들여지고 있는지 알 수 없다는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 무엇이 정당한 요구이고 무엇이 아닌지, 그 기준을 이 관계에서 파악할 수 없다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 내가 해야 할 일의 범위가 어디까지인지, 그것을 이 관계에서 명확하게 정할 수 있는지 알 수 없다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 상대가 어떤 기준으로 이 상황을 판단하고 있는지, 그 기준과 내 기준이 어디서 충돌하는지 파악할 수 없다는 판단입니다.",
+  },
+  overwhelmed: {
+    power_dynamics: "지금 이 반응의 핵심은 내가 이 구조 안에서 한계를 표현하거나 거절할 수 있는 위치에 있지 않다는 판단입니다.",
+    communication:  "지금 이 반응의 핵심은 내 상태를 전달해도 이 관계에서 그것이 반영될 수 있는지 알 수 없다는 판단입니다.",
+    workload:       "지금 이 반응의 핵심은 내가 이 상황을 혼자 감당해야 하는 사람으로 고정돼 있다는 판단입니다.",
+    role_clarity:   "지금 이 반응의 핵심은 역할이 불분명한 채로 계속 확장되는 상황에서 내가 어디까지 감당해야 하는 사람인지 알 수 없다는 판단입니다.",
+    values:         "지금 이 반응의 핵심은 이 환경에서 내 방식으로 일하는 것이 계속 저항을 받는 일이며, 그것을 혼자 감당하고 있다는 판단입니다.",
+  },
+};
+
+function buildEmotionSummary(
+  emotion: string,
+  intensity: number,
+  relationship: string,
+  conflictType: ConflictType
+): string {
+  const ack      = ACKNOWLEDGMENT[emotion] ?? "많이 힘드셨겠어요.";
+  const sig      = SIGNAL[emotion]?.[conflictType] ?? "";
+  const belief   = INNER_BELIEF[emotion]?.[conflictType] ?? "";
+  const func     = PSYCH_FUNCTION[emotion] ?? "";
+  const judgment = RELATIONAL_JUDGMENT[emotion]?.[conflictType] ?? "";
+
+  const base = [ack, sig, belief, func, judgment].filter(Boolean).join(" ");
+
+  if (intensity >= 8) {
+    return base + " 지금 감정의 강도가 매우 높은 상태예요. 이 상태에서 바로 대화를 시작하기보다 먼저 감정을 가라앉힐 시간을 갖는 것을 권해드립니다.";
+  }
+  return base;
+}
+
+// ─── Underlying needs ────────────────────────────────────────────────────────
+
+const EMOTION_NEEDS: Record<string, string[]> = {
+  anger:       ["존중", "공정함", "자율성"],
+  frustration: ["인정", "진전", "명확한 방향"],
+  anxiety:     ["안전감", "예측 가능성", "지지"],
+  hurt:        ["연결감", "공감", "신뢰"],
+  humiliation: ["존엄성", "존중", "심리적 안전감"],
+  sadness:     ["연결감", "신뢰", "소속감"],
+  confusion:   ["명확성", "투명성", "정보"],
+  overwhelmed: ["지지", "균형", "경계"],
+};
+
+function buildNeeds(emotion: string, conflictType: ConflictType) {
+  const emotionNeeds = EMOTION_NEEDS[emotion] ?? ["존중", "명확성"];
+  const typeExtra: Partial<Record<ConflictType, string>> = {
+    power_dynamics: "공정함",
+    role_clarity:   "명확한 방향",
+    workload:       "균형",
+    values:         "진정성",
+    communication:  "경청",
+  };
+  const extra = typeExtra[conflictType];
+  const needs =
+    extra && !emotionNeeds.includes(extra)
+      ? [...emotionNeeds, extra]
+      : emotionNeeds;
+
+  return {
+    needs,
+    summary: `지금 가장 필요한 건 ${needs.slice(0, 2).join(", ")}입니다. 이런 마음은 누구나 느낄 수 있는 자연스러운 바람이에요. 이를 인식하고 표현하는 것이 더 나은 소통의 시작입니다.`,
+  };
+}
+
+// ─── Situation summary ───────────────────────────────────────────────────────
+
+function buildSituationSummary(
+  situation: string,
+  relationship: string,
+  emotion: string
+): string {
+  const rel =
+    relationship === "manager"
+      ? "상사"
+      : relationship === "subordinate"
+      ? "부하직원"
+      : "동료";
+  const emotionKo = EMOTION_LABELS_KO[emotion] ?? emotion;
+  const snippet =
+    situation.length > 120
+      ? situation.slice(0, 120).trimEnd() + "…"
+      : situation;
+  return `${rel}${wa(rel)}의 상황에서 ${emotionKo}${eul(emotionKo)} 느끼신 것 같아요. 아래 내용은 작성해 주신 상황을 바탕으로 정리했어요. "${snippet}"`;
+}
+
+// ─── Dialogue suggestion ─────────────────────────────────────────────────────
+
+function buildOpeningStatement(
+  relationship: string,
+  emotion: string,
+  conflictType: ConflictType
+): string {
+  type RelKey = "manager" | "coworker" | "subordinate";
+
+  // Part 1 — Immediacy: what specifically happened
+  const immediacy: Record<ConflictType, string> = {
+    power_dynamics: "회의에서 제 작업이 다른 사람들 앞에서 지적됐을 때",
+    communication:  "제 말이 응답 없이 넘어갔을 때",
+    workload:       "제가 감당하기 어렵다고 느끼는 상황에서 업무가 계속 들어왔을 때",
+    role_clarity:   "제가 해야 할 일과 아닌 일의 경계가 명확하지 않다고 느꼈을 때",
+    values:         "우리가 이 문제를 다르게 보고 있다는 게 분명해졌을 때",
+  };
+
+  // Part 2 — Actual experience: not abstract, not polite
+  const experience: Record<string, string> = {
+    anger:       "솔직히 많이 화가 났어요",
+    frustration: "계속 답답함이 쌓이더라고요",
+    anxiety:     "불안한 마음이 많이 들었어요",
+    hurt:        "마음이 많이 상했어요",
+    humiliation: "굉장히 창피하고 위축됐어요",
+    sadness:     "무언가 잃은 것 같은 기분이었어요",
+    confusion:   "뭐가 잘못된 건지 정리가 안 됐어요",
+    overwhelmed: "더 이상 감당하기 어렵다는 느낌이 왔어요",
+  };
+
+  // Part 3 — Relational meaning: how user was positioned (emotion × conflictType)
+  const relMeaning: Record<string, Record<ConflictType, string>> = {
+    anger: {
+      power_dynamics: "그게 저한테는 제가 그 자리에서 발언권을 가진 사람이 아닌 것처럼 느껴졌거든요",
+      communication:  "그게 저한테는 제 말이 이 관계에서 들릴 필요가 없는 것으로 처리된 것 같았거든요",
+      workload:       "그게 저한테는 제 한계가 협의할 조건이 아닌 것으로 취급된 것 같았거든요",
+      role_clarity:   "그게 저한테는 제 역할 경계가 제 동의 없이 넘어도 되는 것으로 취급된 것 같았거든요",
+      values:         "그게 저한테는 제 판단 기준이 검토 없이 기각된 것처럼 느껴졌거든요",
+    },
+    frustration: {
+      power_dynamics: "그게 저한테는 제가 이 방식을 바꿀 수 없는 위치에 고정돼 있다는 신호로 느껴졌거든요",
+      communication:  "그게 저한테는 제 말이 이 관계에서 실질적으로 반영되지 않는다는 신호로 느껴졌거든요",
+      workload:       "그게 저한테는 제가 업무 조율의 당사자가 아니라 할당만 받는 역할처럼 느껴졌거든요",
+      role_clarity:   "그게 저한테는 제가 역할을 정하는 데 발언권이 없는 사람처럼 취급되고 있다는 신호로 느껴졌거든요",
+      values:         "그게 저한테는 제 방식이 이 관계에서 논의될 수 없는 문제로 취급되고 있다는 신호로 느껴졌거든요",
+    },
+    anxiety: {
+      power_dynamics: "그게 저한테는 제 위치가 언제든 재평가받을 수 있다는 신호로 느껴졌거든요",
+      communication:  "그게 저한테는 제가 이 관계에서 어떻게 받아들여지고 있는지 알 수 없다는 신호로 느껴졌거든요",
+      workload:       "그게 저한테는 이걸 감당하지 못하는 것이 곧 제 위치에 영향을 줄 수 있다는 신호로 느껴졌거든요",
+      role_clarity:   "그게 저한테는 어떤 기준으로 제가 평가받는지 알 수 없다는 신호로 느껴졌거든요",
+      values:         "그게 저한테는 제 방식이 수용되지 않을 경우 제 위치가 어떻게 될지 모른다는 신호로 느껴졌거든요",
+    },
+    hurt: {
+      power_dynamics: "그게 저한테는 상대가 저를 배려해야 할 사람으로 여기지 않는다는 신호로 느껴졌거든요",
+      communication:  "그게 저한테는 제가 이 사람에게 귀 기울일 가치 있는 존재가 아니라는 신호로 느껴졌거든요",
+      workload:       "그게 저한테는 상대가 제 한계를 자신과 무관한 문제로 취급하고 있다는 신호로 느껴졌거든요",
+      role_clarity:   "그게 저한테는 제가 경계를 표현해도 상대가 그것을 지킬 필요가 없다고 보는 것 같았거든요",
+      values:         "그게 저한테는 제가 중요하게 여기는 것이 상대에게는 배려할 가치가 없는 것으로 취급되고 있다는 신호로 느껴졌거든요",
+    },
+    humiliation: {
+      power_dynamics: "그게 저한테는 제가 그 자리에서 수정받아야 할 존재로 위치된 것처럼 느껴졌거든요",
+      communication:  "그게 저한테는 제 말이 다른 사람들 앞에서 부적절한 것으로 처리된 것처럼 느껴졌거든요",
+      workload:       "그게 저한테는 제가 역할을 제대로 수행하지 못하는 사람으로 드러날 수 있는 상황이라는 신호로 느껴졌거든요",
+      role_clarity:   "그게 저한테는 제가 역할을 잘못 이해하고 있었다는 것이 다른 사람들 앞에서 드러난 것처럼 느껴졌거든요",
+      values:         "그게 저한테는 제 방식이 다른 사람들 앞에서 틀린 것으로 처리된 것처럼 느껴졌거든요",
+    },
+    sadness: {
+      power_dynamics: "그게 저한테는 이 관계에서 제가 배려받을 수 있다는 기대가 성립하지 않는다는 신호로 느껴졌거든요",
+      communication:  "그게 저한테는 이 사람과 서로 들을 수 있는 관계라는 기대가 성립하지 않는다는 신호로 느껴졌거든요",
+      workload:       "그게 저한테는 이 관계에서 공정하게 배려받을 수 있다는 기대가 맞지 않는다는 신호로 느껴졌거든요",
+      role_clarity:   "그게 저한테는 역할이 함께 정리될 수 있는 관계라는 기대가 성립하지 않는다는 신호로 느껴졌거든요",
+      values:         "그게 저한테는 서로의 방식을 존중할 수 있는 관계라는 기대가 맞지 않는다는 신호로 느껴졌거든요",
+    },
+    confusion: {
+      power_dynamics: "그게 저한테는 어떻게 하면 이 사람의 기대를 충족할 수 있는지 알 수 없게 됐거든요",
+      communication:  "그게 저한테는 상대가 어떤 의도로 그렇게 했는지, 그리고 저는 어떻게 받아들여지고 있는지 알 수 없었거든요",
+      workload:       "그게 저한테는 어디까지가 정당한 요구인지 그 기준을 파악하기 어렵거든요",
+      role_clarity:   "그게 저한테는 제가 해야 할 일의 범위가 어디까지인지 이 관계에서 명확하게 알 수 없거든요",
+      values:         "그게 저한테는 상대가 어떤 기준으로 이 상황을 판단하는지, 제 기준과 어디서 충돌하는지 파악이 안 됐거든요",
+    },
+    overwhelmed: {
+      power_dynamics: "그게 저한테는 이 구조 안에서 한계를 표현하거나 거절할 수 있는 위치가 아니라는 신호로 느껴졌거든요",
+      communication:  "그게 저한테는 제 상태를 전달해도 이 관계에서 반영될 수 있는지 알 수 없다는 신호로 느껴졌거든요",
+      workload:       "그게 저한테는 제가 이 상황을 혼자 감당해야 하는 사람으로 고정돼 있다는 신호로 느껴졌거든요",
+      role_clarity:   "그게 저한테는 역할이 어디까지인지 모른 채로 계속 감당해야 하는 것처럼 느껴졌거든요",
+      values:         "그게 저한테는 제 방식으로 일하는 것이 이 환경에서 계속 저항을 받는 일이고, 그걸 혼자 감당하고 있다는 신호로 느껴졌거든요",
+    },
+  };
+
+  // Part 4 — Behavioral request: changes the interaction, not just describes it (conflictType × relationship)
+  const request: Record<ConflictType, Record<RelKey, string>> = {
+    power_dynamics: {
+      manager:     "앞으로는 피드백을 줄 때 다른 사람들이 없는 자리에서 먼저 이야기해주셨으면 해요",
+      coworker:    "앞으로는 피드백을 줄 때 나한테 직접 먼저 이야기해줬으면 해요",
+      subordinate: "앞으로는 이런 경우에 직접 먼저 이야기해줬으면 해요",
+    },
+    communication: {
+      manager:     "그때 제 말을 어떻게 받아들이셨는지 직접 듣고 싶어요",
+      coworker:    "그때 어떻게 받아들였는지 직접 말해줬으면 해요",
+      subordinate: "그때 어떻게 받아들였는지 직접 말해줬으면 해요",
+    },
+    workload: {
+      manager:     "지금 제 업무량을 같이 한번 짚어봤으면 해요. 어디서부터 조율할 수 있는지 확인하고 싶어요",
+      coworker:    "지금 업무 배분이 어떻게 돼 있는지 같이 확인해보고 싶어요",
+      subordinate: "지금 업무 분배가 어떤지 같이 짚어봤으면 해요",
+    },
+    role_clarity: {
+      manager:     "제가 어디까지 맡아야 하는지 명확하게 정해두고 싶어요",
+      coworker:    "어디까지가 각자 역할인지 같이 명확하게 정리해보고 싶어요",
+      subordinate: "어디까지가 각자 역할인지 같이 한번 정리해봤으면 해요",
+    },
+    values: {
+      manager:     "서로 이 부분을 어떻게 다르게 보고 있는지 직접 확인해보고 싶어요",
+      coworker:    "서로 어떻게 다르게 보고 있는지 직접 이야기해보고 싶어요",
+      subordinate: "서로 어떻게 다르게 보고 있는지 직접 이야기해봤으면 해요",
+    },
+  };
+
+  const imm  = immediacy[conflictType];
+  const exp  = experience[emotion] ?? "솔직히 많이 힘들었어요";
+  const rel  = relMeaning[emotion]?.[conflictType] ?? "그게 저한테는 많이 힘든 신호로 느껴졌거든요";
+  const rKey = (relationship as RelKey) in request[conflictType]
+    ? (relationship as RelKey)
+    : "coworker";
+  const req  = request[conflictType][rKey];
+
+  return `"${imm}, ${exp}. ${rel}. ${req}."`;
+}
+
+function buildDialogue(
+  relationship: string,
+  emotion: string,
+  conflictType: ConflictType,
+  intensity: number
+) {
+  const openingStatement = buildOpeningStatement(relationship, emotion, conflictType);
+
+  const keyPointsByType: Partial<Record<ConflictType, string[]>> = {
+    power_dynamics: [
+      "'저는' 또는 '나는'으로 시작해서 그 상황이 내게 어떻게 느껴졌는지 전달하기",
+      "피드백의 내용과 전달 방식을 분리해서 이야기하기",
+      "앞으로 피드백을 더 건설적으로 나눌 수 있는 방법을 함께 찾아보기",
+      "상대방의 의도와 실제 영향이 달랐을 수 있다는 점을 열린 마음으로 이야기하기",
+    ],
+    communication: [
+      "내 입장에서 그 상황이 어떻게 느껴졌는지 담담하게 설명하기",
+      "반응하기 전에 상대방이 왜 그랬는지 먼저 물어보기",
+      "앞으로는 서로 어떻게 소통하면 좋을지 함께 방향 잡기",
+      "사람보다 상황에 초점을 맞춰 이야기하기",
+    ],
+    workload: [
+      "내가 감당할 수 있는 것과 그렇지 않은 것을 구체적으로 이야기하기",
+      "단순히 거절하기보다 우선순위를 함께 조율하자고 제안하기",
+      "업무량의 문제와 감정적인 부분을 분리해서 이야기하기",
+      "실현 가능한 해결책을 제안하거나 함께 찾아보자고 요청하기",
+    ],
+    role_clarity: [
+      "어디서 역할이 겹치거나 불분명하다고 느끼는지 구체적으로 짚어내기",
+      "누가 어떤 부분을 책임지는지 명확히 합의하기",
+      "개인의 잘못이 아닌 구조적인 문제로 접근하기",
+      "합의한 내용을 기록으로 남겨두자고 제안하기",
+    ],
+    values: [
+      "즉각적인 동의를 기대하지 않으며 내 관점을 솔직하게 나누기",
+      "상대방의 생각이 어디서 비롯된 건지 진심으로 이해하려 질문하기",
+      "차이보다 공통된 목표나 방향을 먼저 확인하기",
+      "불편한 부분을 말하기 전에 동의하는 점을 먼저 인정하기",
+    ],
+  };
+
+  const thingsToAvoidByRelationship: Record<string, string[]> = {
+    manager: [
+      "다른 사람이 있는 자리나 상대방이 바쁠 때 꺼내기",
+      "대화가 아닌 일방적인 불만처럼 들릴 수 있는 방식으로 접근하기",
+      "위협적인 표현이나 최후통첩 사용하기",
+    ],
+    coworker: [
+      "일대일로 먼저 이야기하기 전에 다른 사람을 끌어들이기",
+      "간접적인 불만 표현이나 회피하는 태도",
+      "문제가 더 커질 때까지 방치하기",
+    ],
+    subordinate: [
+      "직위를 내세워 대화를 일방적으로 마무리짓기",
+      "상대방 말을 먼저 듣기보다 방어적으로 반응하기",
+      "문제를 꺼내는 것 자체를 부담스럽게 만들기",
+    ],
+  };
+
+  const intensityNote =
+    intensity >= 8
+      ? "감정이 충분히 가라앉은 뒤에 대화를 시작하세요"
+      : "서로 여유 있고 조용한 자리에서 대화하세요";
+
+  return {
+    openingStatement,
+    keyPoints: [
+      intensityNote,
+      ...(keyPointsByType[conflictType] ?? keyPointsByType["communication"]!),
+    ],
+    thingsToAvoid:
+      thingsToAvoidByRelationship[relationship] ??
+      thingsToAvoidByRelationship["coworker"],
+  };
+}
+
+// ─── Action guide ────────────────────────────────────────────────────────────
+
+function buildActionGuide(relationship: string, intensity: number) {
+  const immediate =
+    intensity >= 8
+      ? [
+          "오늘 당장 대화를 시작하지 않아도 됩니다. 먼저 감정이 가라앉을 시간을 주세요",
+          "지금 느끼는 것들을 판단 없이 솔직하게 적어보세요. 자신만을 위한 기록이에요",
+          "짧게라도 몸을 움직여 보세요. 산책이나 호흡처럼 자신에게 맞는 방법이면 돼요",
+          "마음이 좀 가라앉으면, 정말 하고 싶은 말과 그 이유를 차분히 정리해보세요",
+        ]
+      : [
+          "대화 전에 전하고 싶은 말을 미리 적어두세요",
+          "조용하고 편안한 분위기에서 대화할 시간을 잡으세요",
+          "목표를 분명히 하세요. 이기는 것이 아니라 서로를 이해하는 것이에요",
+        ];
+
+  const longTermByRelationship: Record<string, string[]> = {
+    manager: [
+      "정기적인 일대일 대화 시간을 만들어두면 갑작스러운 피드백을 줄일 수 있어요",
+      "먼저 피드백을 요청하는 습관을 들이면 덜 위협적으로 느껴질 수 있습니다",
+      "중요한 대화 후에는 합의한 내용과 기대를 간단히 기록으로 남겨두세요",
+    ],
+    coworker: [
+      "갈등과 무관한 상황에서도 관계에 신경 써보세요. 작은 긍정적인 교류들이 쌓이면 관계가 달라집니다",
+      "문제가 커지기 전에 편하게 이야기 나눌 수 있는 분위기를 평소부터 만들어 두세요",
+      "서로 균형 있게 느끼는지 가끔 확인해보세요",
+    ],
+    subordinate: [
+      "본인이 먼저 피드백에 열린 태도를 보여주면 상대방도 더 편하게 이야기할 수 있어요",
+      "대화 이후에도 업무 관계가 달라지지 않았다는 것을 행동으로 보여주세요",
+      "비슷한 문제가 반복되지 않도록 팀 안의 소통 방식을 함께 점검해보세요",
+    ],
+  };
+
+  return {
+    immediate,
+    longTerm:
+      longTermByRelationship[relationship] ??
+      longTermByRelationship["coworker"],
+  };
+}
+
+// ─── Main generator ──────────────────────────────────────────────────────────
+
+export function generateMockResult(input: ConflictFormValues): ConflictAnalysisResult {
+  const { situation, relationship, emotion, intensity } = input;
+  const conflict = classifyConflictType(situation);
+
+  return {
+    situationSummary: buildSituationSummary(situation, relationship, emotion),
+    emotionAnalysis: {
+      primary: EMOTION_LABELS_KO[emotion] ?? emotion,
+      intensity,
+      intensityLabel: intensityLabel(intensity),
+      summary: buildEmotionSummary(emotion, intensity, relationship, conflict.type),
+    },
+    underlyingNeeds: buildNeeds(emotion, conflict.type),
+    conflictAnalysis: conflict,
+    dialogueSuggestion: buildDialogue(relationship, emotion, conflict.type, intensity),
+    actionGuide: buildActionGuide(relationship, intensity),
+  };
+}

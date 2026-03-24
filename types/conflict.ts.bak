@@ -1,0 +1,61 @@
+export type Emotion =
+  | "anger"
+  | "frustration"
+  | "anxiety"
+  | "hurt"
+  | "humiliation"
+  | "sadness"
+  | "confusion"
+  | "overwhelmed";
+
+export type ConflictType =
+  | "communication"
+  | "values"
+  | "role_clarity"
+  | "power_dynamics"
+  | "workload";
+
+export interface ConflictInput {
+  situation: string;
+  relationship: string;
+  emotion: string;
+  intensity: number;
+}
+
+export interface EmotionAnalysis {
+  primary: string;
+  intensity: number;
+  intensityLabel: "low" | "moderate" | "high" | "very high";
+  summary: string;
+}
+
+export interface UnderlyingNeeds {
+  needs: string[];
+  summary: string;
+}
+
+export interface ConflictAnalysis {
+  type: ConflictType;
+  typeLabel: string;
+  description: string;
+}
+
+export interface DialogueSuggestion {
+  openingStatement: string;
+  keyPoints: string[];
+  thingsToAvoid: string[];
+}
+
+export interface ActionGuide {
+  immediate: string[];
+  longTerm: string[];
+}
+
+export interface ConflictAnalysisResult {
+  situationSummary: string;
+  emotionAnalysis: EmotionAnalysis;
+  underlyingNeeds: UnderlyingNeeds;
+  conflictAnalysis: ConflictAnalysis;
+  dialogueSuggestion: DialogueSuggestion;
+  actionGuide: ActionGuide;
+}
